@@ -163,6 +163,14 @@ class Config:
     def telegram_notify_api_changes(self) -> bool:
         return _env_bool("TELEGRAM_NOTIFY_API_CHANGES", default=True)
 
+    @property
+    def disable_unreachable_hosts(self) -> bool:
+        return _env_bool("DISABLE_UNREACHABLE_HOSTS")
+
+    @property
+    def telegram_notify_host_changes(self) -> bool:
+        return _env_bool("TELEGRAM_NOTIFY_HOST_CHANGES", default=True)
+
     # --- YAML config ---
 
     @property

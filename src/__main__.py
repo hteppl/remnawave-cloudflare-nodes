@@ -6,9 +6,10 @@ import uvicorn
 
 from .cloudflare_dns import CloudflareClient, DNSManager
 from .config import Config
+from .hosts_config import HostsConfig
 from .i18n import get_translator
 from .monitoring_service import MonitoringService
-from .panel import RemnawaveClient, NodeMonitor
+from .panel import RemnawaveClient, NodeMonitor, HostManager
 from .telegram import TelegramNotifier, ServiceStarted
 from .utils.logger import setup_logger
 
@@ -66,6 +67,8 @@ async def main():
         try:
             config.reload()
             config.validate()
+            if host_manager:
+                host_manager.reload()
             logger.info("Config reloaded from disk successfully")
         except Exception as e:
             logger.error(f"Config reload failed, keeping current config: {e}")
@@ -89,6 +92,14 @@ async def main():
         notify_api_changes=config.telegram_notify_api_changes,
     )
 
+    host_manager = HostManager(
+        client=remnawave_client,
+        notifier=notifier,
+        enabled=config.disable_unreachable_hosts,
+        notify_changes=config.telegram_notify_host_changes,
+        hosts_config=HostsConfig(),
+    )
+
     cloudflare_client = CloudflareClient(api_token=config.cloudflare_token)
     dns_manager = DNSManager(
         client=cloudflare_client,
@@ -102,6 +113,7 @@ async def main():
         node_monitor=node_monitor,
         cloudflare_client=cloudflare_client,
         dns_manager=dns_manager,
+        host_manager=host_manager,
         notifier=notifier,
     )
 

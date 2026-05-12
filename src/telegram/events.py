@@ -71,6 +71,13 @@ class ServiceStarted:
     api_port: int = 0
 
 
+@dataclass
+class HostStateChange:
+    changes: List[dict]  # each dict has: remark, address, action ("enabled" or "disabled")
+    # Grouped by address for better formatting: {address: {"action": "enabled|disabled", "remarks": [...]}}
+    grouped: Optional[dict] = None
+
+
 # API events
 
 @dataclass
