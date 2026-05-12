@@ -108,11 +108,12 @@ class MessageFormatter:
         return self._i18n.get("service-stopped")
 
     def format_host_state_change(self, change: "HostStateChange") -> str:
-        lines = []
+        group_blocks = []
         grouped = change.grouped or {}
         for address, info in grouped.items():
             action = info.get("action", "")
             remarks = info.get("remarks", [])
+            lines = []
             for remark in remarks:
                 if action == "enabled":
                     lines.append(self._i18n.get("host-enabled", remark=remark))
@@ -123,7 +124,8 @@ class MessageFormatter:
                 lines.append(self._i18n.get("host-group-enabled", address=address))
             else:
                 lines.append(self._i18n.get("host-group-disabled", address=address))
-        return self._i18n.get("host-state-change", changes="\n".join(lines))
+            group_blocks.append("\n".join(lines))
+        return self._i18n.get("host-state-change", changes="\n\n".join(group_blocks))
 
     def format_api_config_updated(self, event: ApiConfigUpdated) -> str:
         return self._i18n.get(
