@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from .cloudflare_dns import CloudflareClient, DNSManager
 from .config import Config
-from .panel import NodeMonitor
+from .panel import HostManager, NodeMonitor
 from .utils.dns import build_fqdn
 from .utils.logger import get_logger
 
@@ -17,12 +17,14 @@ class MonitoringService:
             node_monitor: NodeMonitor,
             cloudflare_client: CloudflareClient,
             dns_manager: DNSManager,
+            host_manager: Optional["HostManager"] = None,
             notifier: Optional["TelegramNotifier"] = None,
     ):
         self.config = config
         self.node_monitor = node_monitor
         self.cloudflare_client = cloudflare_client
         self.dns_manager = dns_manager
+        self.host_manager = host_manager
         self.notifier = notifier
         self.logger = get_logger(__name__)
         self._zone_id_cache: Dict[str, str] = {}
@@ -96,7 +98,10 @@ class MonitoringService:
             self._check_node_transitions(configured_nodes, nodes_by_address)
             self._check_critical_state(configured_nodes, unhealthy_nodes)
 
-            await self._sync_all_zones(nodes_by_address)
+            active_fqdns, managed_fqdns = await self._sync_all_zones(nodes_by_address)
+
+            if self.host_manager:
+                await self.host_manager.sync_host_states(active_fqdns, managed_fqdns)
 
             self.logger.info("Health check cycle completed")
 
@@ -115,7 +120,10 @@ class MonitoringService:
                 addresses.add(entry["address"])
         return addresses
 
-    async def _sync_all_zones(self, nodes_by_address: Dict[str, object]) -> None:
+    async def _sync_all_zones(self, nodes_by_address: Dict[str, object]) -> tuple[Set[str], Set[str]]:
+        active_fqdns: Set[str] = set()
+        managed_fqdns: Set[str] = set()
+
         for zone in self.config.get_all_zones():
             domain = zone["domain"]
 
@@ -133,7 +141,10 @@ class MonitoringService:
                 if node and node.is_healthy:
                     healthy_ips.add(dns_ip)
 
-            await self.dns_manager.sync_dns_records(
+            full_domain = build_fqdn(zone["name"], domain)
+            managed_fqdns.add(full_domain)
+
+            active_ips = await self.dns_manager.sync_dns_records(
                 zone_id=zone_id,
                 zone_name=zone["name"],
                 domain=domain,
@@ -142,6 +153,11 @@ class MonitoringService:
                 ttl=zone["ttl"],
                 proxied=zone["proxied"],
             )
+
+            if active_ips:
+                active_fqdns.add(full_domain)
+
+        return active_fqdns, managed_fqdns
 
     async def _get_zone_id(self, domain: str) -> Optional[str]:
         if domain in self._zone_id_cache:

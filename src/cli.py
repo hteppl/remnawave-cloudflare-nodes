@@ -10,6 +10,11 @@ def _load_config():
     return Config()
 
 
+def _load_hosts_config():
+    from .hosts_config import HostsConfig
+    return HostsConfig()
+
+
 def _print_separator():
     print("─" * 48)
 
@@ -44,6 +49,18 @@ def action_show():
             for entry in z["nodes"]:
                 note = f"  →  {entry['address']}" if entry["address"] != entry["ip"] else ""
                 print(f"      {entry['ip']}{note}")
+
+    hosts_config = _load_hosts_config()
+    print("\n  Managed Hosts")
+    if not hosts_config.enabled:
+        print("    (no hosts.yml — all matching hosts are managed)")
+    else:
+        for entry in hosts_config.entries:
+            uuid = entry.get("uuid", "")
+            label = entry.get("label", "")
+            label_str = f"  {label}" if label else ""
+            print(f"    {uuid}{label_str}")
+
     _print_separator()
 
 
@@ -59,6 +76,7 @@ def action_validate():
 
     from .utils.dns import build_fqdn
     zones = config.get_all_zones()
+    hosts_config = _load_hosts_config()
 
     _print_separator()
     print("  ✓  Config is valid\n")
@@ -69,6 +87,13 @@ def action_validate():
     for z in zones:
         fqdn = build_fqdn(z["name"], z["domain"])
         print(f"      {fqdn}  —  {len(z['nodes'])} node(s), ttl={z['ttl']}, proxied={z['proxied']}")
+    if hosts_config.enabled:
+        print(f"\n    Managed hosts  : {len(hosts_config.uuids)}")
+        for entry in hosts_config.entries:
+            uuid = entry.get("uuid", "")
+            label = entry.get("label", "")
+            label_str = f" ({label})" if label else ""
+            print(f"      {uuid}{label_str}")
     _print_separator()
 
 

@@ -49,6 +49,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
             "check_interval": config.check_interval,
             "log_level": config.log_level,
             "domains": config.domains,
+            "disable_unreachable_hosts": config.disable_unreachable_hosts,
             "telegram": {
                 "enabled": config.telegram_enabled,
                 "language": config.language,
@@ -58,6 +59,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
                     "errors": config.telegram_notify_errors,
                     "critical": config.telegram_notify_critical,
                     "api_changes": config.telegram_notify_api_changes,
+                    "host_changes": config.telegram_notify_host_changes,
                 },
             },
         }
