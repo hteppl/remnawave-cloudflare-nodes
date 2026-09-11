@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import logging
 import signal
 import sys
 
@@ -10,7 +12,7 @@ from .hosts_config import HostsConfig
 from .i18n import get_translator
 from .monitoring_service import MonitoringService
 from .panel import RemnawaveClient, NodeMonitor, HostManager
-from .telegram import TelegramNotifier, ServiceStarted
+from .telegram import EventCategory, ServiceStarted, ServiceStopped, TelegramNotifier, ZoneSummary
 from .utils.logger import setup_logger
 
 
@@ -22,34 +24,34 @@ def raise_graceful_exit(signum, frame):
     raise GracefulExit()
 
 
+def muted_categories(config: Config) -> set[EventCategory]:
+    toggles = {
+        EventCategory.NODE: config.telegram_notify_node_changes,
+        EventCategory.DNS: config.telegram_notify_dns_changes,
+        EventCategory.ERROR: config.telegram_notify_errors,
+        EventCategory.CRITICAL: config.telegram_notify_critical,
+        EventCategory.HOST: config.telegram_notify_host_changes,
+        EventCategory.API: config.telegram_notify_api_changes,
+    }
+    return {category for category, enabled in toggles.items() if not enabled}
+
+
 async def run_api_server(app, host: str, port: int) -> None:
-    server_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(server_config)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
     server.install_signal_handlers = lambda: None  # our signal handlers manage shutdown
     await server.serve()
 
 
-async def run_monitoring_loop(service: MonitoringService, config: Config, logger):
+async def run_monitoring_loop(service: MonitoringService, config: Config, logger: logging.Logger) -> None:
     logger.info(f"Starting monitoring loop with {config.check_interval}s interval")
 
     while True:
         try:
             await service.perform_health_check()
-
-            interval = config.check_interval
-            logger.info(f"Waiting {interval} seconds until next check...")
-            await asyncio.sleep(interval)
-
-        except GracefulExit:
-            logger.info("Received shutdown signal, stopping...")
-            break
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt, stopping...")
-            break
+            logger.info(f"Waiting {config.check_interval} seconds until next check...")
         except Exception as e:
-            interval = config.check_interval
-            logger.info(f"Retrying in {interval} seconds after error: {e}")
-            await asyncio.sleep(interval)
+            logger.info(f"Retrying in {config.check_interval} seconds after error: {e}")
+        await asyncio.sleep(config.check_interval)
 
 
 async def main():
@@ -57,73 +59,54 @@ async def main():
     config.validate()
 
     logger = setup_logger(name="remnawave-cloudflare-monitor", level=config.log_level, log_file="logs/app.log")
-
-    signal.signal(signal.SIGTERM, raise_graceful_exit)
-    signal.signal(signal.SIGINT, raise_graceful_exit)
-
-    loop = asyncio.get_event_loop()
-
-    def handle_sighup():
-        try:
-            config.reload()
-            config.validate()
-            if host_manager:
-                host_manager.reload()
-            logger.info("Config reloaded from disk successfully")
-        except Exception as e:
-            logger.error(f"Config reload failed, keeping current config: {e}")
-
-    loop.add_signal_handler(signal.SIGHUP, handle_sighup)
-
     get_translator(config.language)
 
     logger.info("Starting Remnawave-Cloudflare DNS Monitor")
     logger.info(f"Check interval: {config.check_interval}s")
-
-    remnawave_client = RemnawaveClient(api_url=config.remnawave_url, api_key=config.remnawave_api_key)
-
-    node_monitor = NodeMonitor(remnawave_client)
 
     notifier = TelegramNotifier(
         bot_token=config.telegram_bot_token,
         chat_id=config.telegram_chat_id,
         topic_id=config.telegram_topic_id,
         enabled=config.telegram_enabled,
-        notify_api_changes=config.telegram_notify_api_changes,
+        muted=muted_categories(config),
     )
-
+    remnawave_client = RemnawaveClient(api_url=config.remnawave_url, api_key=config.remnawave_api_key)
+    cloudflare_client = CloudflareClient(api_token=config.cloudflare_token)
     host_manager = HostManager(
         client=remnawave_client,
         notifier=notifier,
         enabled=config.disable_unreachable_hosts,
-        notify_changes=config.telegram_notify_host_changes,
         hosts_config=HostsConfig(),
     )
-
-    cloudflare_client = CloudflareClient(api_token=config.cloudflare_token)
-    dns_manager = DNSManager(
-        client=cloudflare_client,
-        notifier=notifier,
-        notify_dns_changes=config.telegram_notify_dns_changes,
-        notify_errors=config.telegram_notify_errors,
-    )
-
     monitoring_service = MonitoringService(
         config=config,
-        node_monitor=node_monitor,
+        node_monitor=NodeMonitor(remnawave_client),
         cloudflare_client=cloudflare_client,
-        dns_manager=dns_manager,
+        dns_manager=DNSManager(client=cloudflare_client, notifier=notifier),
         host_manager=host_manager,
         notifier=notifier,
     )
 
-    api_task = None
+    def handle_sighup():
+        try:
+            config.reload()
+            config.validate()
+            host_manager.reload()
+            logger.info("Config reloaded from disk successfully")
+        except Exception as e:
+            logger.error(f"Config reload failed, keeping current config: {e}")
 
+    signal.signal(signal.SIGTERM, raise_graceful_exit)
+    signal.signal(signal.SIGINT, raise_graceful_exit)
+    asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, handle_sighup)
+
+    api_task = None
     try:
         await notifier.start()
-        notifier.notify_service_started(
+        notifier.notify(
             ServiceStarted(
-                domains=config.domains,
+                zones=[ZoneSummary(fqdn=z.fqdn, node_count=len(z.nodes)) for z in config.get_all_zones()],
                 api_enabled=config.api_enabled,
                 api_host=config.api_host,
                 api_port=config.api_port,
@@ -148,11 +131,9 @@ async def main():
     finally:
         if api_task:
             api_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await api_task
-            except asyncio.CancelledError:
-                pass
-        notifier.notify_service_stopped()
+        notifier.notify(ServiceStopped())
         await notifier.stop()
 
     logger.info("Remnawave-Cloudflare DNS Monitor stopped")

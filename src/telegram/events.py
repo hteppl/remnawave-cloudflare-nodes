@@ -1,5 +1,23 @@
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import ClassVar, Dict, List, Optional
+
+
+class EventCategory(StrEnum):
+    """Notification categories; each can be muted independently via TELEGRAM_NOTIFY_* settings."""
+
+    SERVICE = "service"
+    NODE = "node"
+    DNS = "dns"
+    ERROR = "error"
+    CRITICAL = "critical"
+    HOST = "host"
+    API = "api"
+
+
+@dataclass
+class Event:
+    category: ClassVar[EventCategory] = EventCategory.SERVICE
 
 
 @dataclass
@@ -7,20 +25,28 @@ class ZoneStats:
     name: str
     total: int
     online: int
-    offline: int
+
+    @property
+    def offline(self) -> int:
+        return self.total - self.online
 
 
 @dataclass
 class NodeStats:
     total: int
     online: int
-    offline: int
     disabled: int
-    zones: List["ZoneStats"]
+    zones: List[ZoneStats] = field(default_factory=list)
+
+    @property
+    def offline(self) -> int:
+        return self.total - self.online
 
 
 @dataclass
-class NodeStateChange:
+class NodeStateChange(Event):
+    category = EventCategory.NODE
+
     node_name: str
     node_address: str
     previous_healthy: bool
@@ -30,77 +56,107 @@ class NodeStateChange:
 
 
 @dataclass
-class DNSChange:
-    domain: str
-    zone_name: str
+class DNSChange(Event):
+    category = EventCategory.DNS
+
+    fqdn: str
     ip_address: str
     action: str  # "added" or "removed"
 
 
 @dataclass
-class DNSError:
-    domain: str
-    zone_name: str
+class DNSError(Event):
+    category = EventCategory.ERROR
+
+    fqdn: str
     ip_address: str
-    action: str
+    action: str  # "add" or "remove"
     error_message: str
 
 
 @dataclass
-class CriticalState:
+class CriticalState(Event):
+    category = EventCategory.CRITICAL
+
     total_nodes: int
     down_nodes: List[str]
 
 
 @dataclass
-class CriticalStateRecovered:
+class CriticalStateRecovered(Event):
+    category = EventCategory.CRITICAL
+
     total_nodes: int
     online_nodes: int
 
 
 @dataclass
-class HealthCheckError:
+class HealthCheckError(Event):
+    category = EventCategory.ERROR
+
     error_message: str
 
 
 @dataclass
-class ServiceStarted:
-    domains: List[dict]
+class ZoneSummary:
+    fqdn: str
+    node_count: int
+
+
+@dataclass
+class ServiceStarted(Event):
+    zones: List[ZoneSummary]
     api_enabled: bool = False
     api_host: str = ""
     api_port: int = 0
 
 
 @dataclass
-class HostStateChange:
-    changes: List[dict]  # each dict has: remark, address, action ("enabled" or "disabled")
-    # Grouped by address for better formatting: {address: {"action": "enabled|disabled", "remarks": [...]}}
-    grouped: Optional[dict] = None
+class ServiceStopped(Event):
+    pass
+
+
+@dataclass
+class HostGroupChange:
+    action: str  # "enabled" or "disabled"
+    remarks: List[str] = field(default_factory=list)
+
+
+@dataclass
+class HostStateChange(Event):
+    category = EventCategory.HOST
+
+    groups: Dict[str, HostGroupChange]  # keyed by host address
 
 
 # API events
 
 @dataclass
-class ApiConfigUpdated:
+class ApiEvent(Event):
+    category = EventCategory.API
+
+
+@dataclass
+class ApiConfigUpdated(ApiEvent):
     changes: List[str]
     client_ip: str
 
 
 @dataclass
-class ApiDomainAdded:
+class ApiDomainAdded(ApiEvent):
     domain: str
     zones: List[dict]
     client_ip: str
 
 
 @dataclass
-class ApiDomainRemoved:
+class ApiDomainRemoved(ApiEvent):
     domain: str
     client_ip: str
 
 
 @dataclass
-class ApiZoneAdded:
+class ApiZoneAdded(ApiEvent):
     domain: str
     zone_name: str
     ips: List[str]
@@ -110,7 +166,7 @@ class ApiZoneAdded:
 
 
 @dataclass
-class ApiZoneUpdated:
+class ApiZoneUpdated(ApiEvent):
     domain: str
     zone_name: str
     changes: dict
@@ -118,7 +174,7 @@ class ApiZoneUpdated:
 
 
 @dataclass
-class ApiZoneRemoved:
+class ApiZoneRemoved(ApiEvent):
     domain: str
     zone_name: str
     client_ip: str

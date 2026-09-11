@@ -1,4 +1,6 @@
 from .events import (
+    Event,
+    EventCategory,
     ZoneStats,
     NodeStats,
     NodeStateChange,
@@ -7,7 +9,10 @@ from .events import (
     CriticalState,
     CriticalStateRecovered,
     HealthCheckError,
+    ZoneSummary,
     ServiceStarted,
+    ServiceStopped,
+    HostGroupChange,
     HostStateChange,
     ApiConfigUpdated,
     ApiDomainAdded,
@@ -21,6 +26,9 @@ from .notifier import TelegramNotifier
 
 __all__ = [
     "TelegramNotifier",
+    "MessageFormatter",
+    "Event",
+    "EventCategory",
     "ZoneStats",
     "NodeStats",
     "NodeStateChange",
@@ -29,7 +37,10 @@ __all__ = [
     "CriticalState",
     "CriticalStateRecovered",
     "HealthCheckError",
+    "ZoneSummary",
     "ServiceStarted",
+    "ServiceStopped",
+    "HostGroupChange",
     "HostStateChange",
     "ApiConfigUpdated",
     "ApiDomainAdded",
@@ -37,5 +48,4 @@ __all__ = [
     "ApiZoneAdded",
     "ApiZoneUpdated",
     "ApiZoneRemoved",
-    "MessageFormatter",
 ]

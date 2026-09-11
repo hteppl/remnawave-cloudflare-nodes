@@ -1,15 +1,34 @@
 import asyncio
 import time
-from typing import List, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from cloudflare import AsyncCloudflare
 
 from ..utils.logger import get_logger
+from ..utils.retry import retry_async
+
+T = TypeVar("T")
+
+
+def _is_server_error(e: Exception) -> bool:
+    """Client errors (4xx) are deterministic, so retrying them is pointless."""
+    status_code = getattr(e, "status_code", None)
+    return not (status_code and 400 <= status_code < 500)
+
+
+def _record_to_dict(record: Any) -> Dict:
+    return {
+        "id": record.id,
+        "name": record.name,
+        "content": record.content,
+        "type": record.type,
+        "ttl": record.ttl,
+        "proxied": record.proxied,
+    }
 
 
 class CloudflareClient:
     def __init__(self, api_token: str, rate_limit_delay: float = 0.25, retry_delay: float = 1.0, max_retries: int = 5):
-        self.api_token = api_token
         self.logger = get_logger(__name__)
         self.cf = AsyncCloudflare(api_token=api_token)
         self.rate_limit_delay = rate_limit_delay
@@ -25,154 +44,66 @@ class CloudflareClient:
                 await asyncio.sleep(self.rate_limit_delay - elapsed)
             self._last_request_time = time.monotonic()
 
-    async def _retry_delay(self, attempt: int) -> None:
-        delay = min(self.retry_delay * attempt, 30.0)
-        await asyncio.sleep(delay)
+    async def _request(
+            self,
+            description: str,
+            operation: Callable[[], Awaitable[T]],
+            should_retry: Callable[[Exception], bool] = lambda _: True,
+    ) -> T:
+        async def rate_limited() -> T:
+            await self._rate_limit()
+            return await operation()
 
-    async def get_dns_records(self, zone_id: str, name: str = None, record_type: str = "A") -> List[Dict]:
-        attempt = 0
-        while True:
-            try:
-                await self._rate_limit()
-                params = {"type": record_type}
-                if name:
-                    params["name"] = name
+        return await retry_async(
+            rate_limited,
+            description=description,
+            logger=self.logger,
+            attempts=self.max_retries,
+            base_delay=self.retry_delay,
+            should_retry=should_retry,
+        )
 
-                records_list = []
-                async for record in self.cf.dns.records.list(zone_id=zone_id, **params):
-                    records_list.append(
-                        {
-                            "id": record.id,
-                            "name": record.name,
-                            "content": record.content,
-                            "type": record.type,
-                            "ttl": record.ttl,
-                            "proxied": record.proxied,
-                        }
-                    )
+    async def get_dns_records(self, zone_id: str, name: Optional[str] = None, record_type: str = "A") -> List[Dict]:
+        params = {"type": record_type}
+        if name:
+            params["name"] = name
 
-                self.logger.debug(f"Found {len(records_list)} DNS records for zone {zone_id}")
-                return records_list
+        async def fetch() -> List[Dict]:
+            return [_record_to_dict(r) async for r in self.cf.dns.records.list(zone_id=zone_id, **params)]
 
-            except Exception as e:
-                attempt += 1
-                self.logger.error(f"Error fetching DNS records (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt >= self.max_retries:
-                    raise
-                await self._retry_delay(attempt)
+        records = await self._request("Fetching DNS records", fetch)
+        self.logger.debug(f"Found {len(records)} DNS records for zone {zone_id}")
+        return records
 
     async def create_dns_record(
             self, zone_id: str, name: str, content: str, record_type: str = "A", ttl: int = 120, proxied: bool = False
     ) -> Dict:
-        attempt = 0
-        while True:
-            try:
-                await self._rate_limit()
-                record = await self.cf.dns.records.create(  # type: ignore[call-overload]
-                    zone_id=zone_id, type=record_type, name=name, content=content, ttl=int(ttl), proxied=proxied
-                )
-                self.logger.info(f"Created DNS record: {name} -> {content}")
-                return {
-                    "id": record.id,
-                    "name": record.name,
-                    "content": record.content,
-                    "type": record.type,
-                    "ttl": record.ttl,
-                    "proxied": record.proxied,
-                }
-
-            except Exception as e:
-                status_code = getattr(e, "status_code", None)
-                if status_code and 400 <= status_code < 500:
-                    raise
-                attempt += 1
-                self.logger.error(f"Error creating DNS record (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt >= self.max_retries:
-                    raise
-                await self._retry_delay(attempt)
-
-    async def update_dns_record(
-            self,
-            zone_id: str,
-            record_id: str,
-            name: str,
-            content: str,
-            record_type: str = "A",
-            ttl: int = 120,
-            proxied: bool = False,
-    ) -> Dict:
-        attempt = 0
-        while True:
-            try:
-                await self._rate_limit()
-                record = await self.cf.dns.records.update(  # type: ignore[call-overload]
-                    dns_record_id=record_id,
-                    zone_id=zone_id,
-                    type=record_type,
-                    name=name,
-                    content=content,
-                    ttl=int(ttl),
-                    proxied=proxied,
-                )
-                self.logger.info(f"Updated DNS record: {name} -> {content}")
-                return {
-                    "id": record.id,
-                    "name": record.name,
-                    "content": record.content,
-                    "type": record.type,
-                    "ttl": record.ttl,
-                    "proxied": record.proxied,
-                }
-
-            except Exception as e:
-                attempt += 1
-                self.logger.error(f"Error updating DNS record (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt >= self.max_retries:
-                    raise
-                await self._retry_delay(attempt)
+        record = await self._request(
+            "Creating DNS record",
+            lambda: self.cf.dns.records.create(  # type: ignore[call-overload]
+                zone_id=zone_id, type=record_type, name=name, content=content, ttl=int(ttl), proxied=proxied
+            ),
+            should_retry=_is_server_error,
+        )
+        self.logger.debug(f"Created DNS record: {name} -> {content}")
+        return _record_to_dict(record)
 
     async def delete_dns_record(self, zone_id: str, record_id: str) -> None:
-        attempt = 0
-        while True:
-            try:
-                await self._rate_limit()
-                await self.cf.dns.records.delete(dns_record_id=record_id, zone_id=zone_id)
-                self.logger.info(f"Deleted DNS record: {record_id}")
-                return
-
-            except Exception as e:
-                attempt += 1
-                self.logger.error(f"Error deleting DNS record (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt >= self.max_retries:
-                    raise
-                await self._retry_delay(attempt)
-
-    async def get_record_by_name_and_content(
-            self, zone_id: str, name: str, content: str, record_type: str = "A"
-    ) -> Optional[Dict]:
-        records = await self.get_dns_records(zone_id, name=name, record_type=record_type)
-        for record in records:
-            if record.get("content") == content:
-                return record
-        return None
+        await self._request(
+            "Deleting DNS record",
+            lambda: self.cf.dns.records.delete(dns_record_id=record_id, zone_id=zone_id),
+        )
+        self.logger.debug(f"Deleted DNS record: {record_id}")
 
     async def get_zone_id_by_domain(self, domain: str) -> Optional[str]:
-        attempt = 0
-        while True:
-            try:
-                await self._rate_limit()
-                async for zone in self.cf.zones.list(name=domain):
-                    zone_id = zone.id
-                    self.logger.info(f"Found zone_id for {domain}: {zone_id}")
-                    return zone_id
+        async def fetch() -> Optional[str]:
+            async for zone in self.cf.zones.list(name=domain):
+                return zone.id
+            return None
 
-                self.logger.error(f"No zone found for domain: {domain}")
-                return None
-
-            except Exception as e:
-                attempt += 1
-                self.logger.error(
-                    f"Error fetching zone for domain {domain} (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt >= self.max_retries:
-                    raise
-                await self._retry_delay(attempt)
+        zone_id = await self._request(f"Fetching zone for domain {domain}", fetch)
+        if zone_id:
+            self.logger.info(f"Found zone_id for {domain}: {zone_id}")
+        else:
+            self.logger.error(f"No zone found for domain: {domain}")
+        return zone_id

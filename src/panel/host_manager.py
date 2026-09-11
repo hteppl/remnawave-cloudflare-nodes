@@ -1,9 +1,9 @@
 from typing import Dict, List, Optional, Set
 
 from .client import RemnawaveClient
-from ..telegram import TelegramNotifier, HostStateChange
-from ..utils.logger import get_logger
 from ..hosts_config import HostsConfig
+from ..telegram import HostGroupChange, HostStateChange, TelegramNotifier
+from ..utils.logger import get_logger
 
 
 class HostManager:
@@ -15,17 +15,15 @@ class HostManager:
     """
 
     def __init__(
-        self,
-        client: RemnawaveClient,
-        notifier: Optional[TelegramNotifier] = None,
-        enabled: bool = False,
-        notify_changes: bool = True,
-        hosts_config: Optional[HostsConfig] = None,
+            self,
+            client: RemnawaveClient,
+            notifier: Optional[TelegramNotifier] = None,
+            enabled: bool = False,
+            hosts_config: Optional[HostsConfig] = None,
     ):
         self.client = client
         self.notifier = notifier
         self.enabled = enabled
-        self.notify_changes = notify_changes
         self.hosts_config = hosts_config
         self.logger = get_logger(__name__)
         self._previous_host_states: Dict[str, bool] = {}
@@ -47,92 +45,52 @@ class HostManager:
             self.logger.error(f"Failed to fetch hosts: {e}")
             return
 
-        to_disable: List[str] = []
-        to_enable: List[str] = []
-        changes: List[dict] = []
-        current_uuids: Set[str] = set()
+        pending: Dict[bool, List[str]] = {False: [], True: []}  # disable first, then enable
+        groups: Dict[str, HostGroupChange] = {}
+        seen_uuids: Set[str] = set()
 
         for host in hosts:
-            address = host.address
-            if address not in managed_fqdns:
+            if host.address not in managed_fqdns:
                 continue
 
-            host_uuid_str = str(host.uuid)
-            current_uuids.add(host_uuid_str)
+            uuid = str(host.uuid)
+            seen_uuids.add(uuid)
 
             # Skip hosts not in the safelist when hosts.yml is present
-            if self.hosts_config and not self.hosts_config.is_managed(host_uuid_str):
+            if self.hosts_config and not self.hosts_config.is_managed(uuid):
                 continue
 
-            desired_enabled = address in active_fqdns
-            current_enabled = not host.is_disabled
-            prev_enabled = self._previous_host_states.get(host_uuid_str)
+            desired = host.address in active_fqdns
+            is_first_encounter = uuid not in self._previous_host_states
+            self._previous_host_states[uuid] = desired
 
-            if prev_enabled is None:
-                # First encounter: silently sync to desired state if needed
-                if desired_enabled != current_enabled:
-                    if desired_enabled:
-                        to_enable.append(host_uuid_str)
-                    else:
-                        to_disable.append(host_uuid_str)
-                self._previous_host_states[host_uuid_str] = desired_enabled
+            if desired == (not host.is_disabled):
                 continue
 
-            if desired_enabled == current_enabled:
-                # Already in correct state
-                self._previous_host_states[host_uuid_str] = current_enabled
-                continue
+            pending[desired].append(uuid)
+            # First encounter syncs silently; only real transitions are reported
+            if not is_first_encounter:
+                action = "enabled" if desired else "disabled"
+                groups.setdefault(host.address, HostGroupChange(action=action)).remarks.append(host.remark)
+                self.logger.info(f"Host {host.remark} ({host.address}) will be {action}")
 
-            # State transition
-            if desired_enabled:
-                to_enable.append(host_uuid_str)
-                changes.append({
-                    "remark": host.remark,
-                    "address": address,
-                    "action": "enabled",
-                })
-                self.logger.info(f"Host {host.remark} ({address}) will be enabled")
-            else:
-                to_disable.append(host_uuid_str)
-                changes.append({
-                    "remark": host.remark,
-                    "address": address,
-                    "action": "disabled",
-                })
-                self.logger.info(f"Host {host.remark} ({address}) will be disabled")
-
-            self._previous_host_states[host_uuid_str] = desired_enabled
-
-        # Clean up stale entries
-        stale = set(self._previous_host_states.keys()) - current_uuids
-        for uuid in stale:
+        for uuid in self._previous_host_states.keys() - seen_uuids:
             del self._previous_host_states[uuid]
 
-        if to_disable:
-            try:
-                await self.client.disable_hosts(to_disable)
-                self.logger.info(f"Bulk disabled {len(to_disable)} hosts")
-            except Exception as e:
-                self.logger.error(f"Failed to disable hosts: {e}")
-                # On API error, revert state tracking so next cycle retries
-                for u in to_disable:
-                    self._previous_host_states[u] = True
+        for enabled, uuids in pending.items():
+            if uuids:
+                await self._apply(uuids, enabled)
 
-        if to_enable:
-            try:
-                await self.client.enable_hosts(to_enable)
-                self.logger.info(f"Bulk enabled {len(to_enable)} hosts")
-            except Exception as e:
-                self.logger.error(f"Failed to enable hosts: {e}")
-                for u in to_enable:
-                    self._previous_host_states[u] = False
+        if groups and self.notifier:
+            self.notifier.notify(HostStateChange(groups=groups))
 
-        if changes and self.notifier and self.notify_changes:
-            # Group changes by address for richer telegram formatting
-            grouped: dict = {}
-            for c in changes:
-                addr = c["address"]
-                if addr not in grouped:
-                    grouped[addr] = {"action": c["action"], "remarks": []}
-                grouped[addr]["remarks"].append(c["remark"])
-            self.notifier.notify_host_state_change(HostStateChange(changes=changes, grouped=grouped))
+    async def _apply(self, uuids: List[str], enabled: bool) -> None:
+        action = "enable" if enabled else "disable"
+        try:
+            await self.client.set_hosts_enabled(uuids, enabled)
+            self.logger.info(f"Bulk {action}d {len(uuids)} hosts")
+        except Exception as e:
+            self.logger.error(f"Failed to {action} hosts: {e}")
+            # Revert state tracking so the next cycle retries
+            for uuid in uuids:
+                self._previous_host_states[uuid] = not enabled

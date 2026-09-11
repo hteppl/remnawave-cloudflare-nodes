@@ -1,11 +1,13 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
 from .auth import make_auth_dependency
 from .models import ConfigPatch, DomainIn, ZoneIn, ZonePatch
-from ..config import Config
+from ..config import Config, ConfigConflictError, ConfigNotFoundError
 from ..telegram import (
+    Event,
     TelegramNotifier,
     ApiConfigUpdated,
     ApiDomainAdded,
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+OK = {"status": "ok"}
+
 
 def _client_ip(request: Request) -> str:
     if forwarded_for := request.headers.get("X-Forwarded-For"):
@@ -32,6 +36,21 @@ def _client_ip(request: Request) -> str:
     return "unknown"
 
 
+ClientIP = Annotated[str, Depends(_client_ip)]
+
+
+def _format_changes(updates: dict) -> str:
+    parts = []
+    for key, value in updates.items():
+        if key == "ips":
+            parts.append(f"ips={', '.join(value)}")
+        elif key == "nodes":
+            parts.append(f"nodes={len(value)} entry(s)")
+        else:
+            parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
 def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "MonitoringService") -> FastAPI:
     app = FastAPI(
         title="Remnawave Cloudflare DNS Monitor",
@@ -39,13 +58,24 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        dependencies=[Depends(make_auth_dependency(config.api_token))],
     )
 
-    auth = make_auth_dependency(config.api_token)
+    @app.exception_handler(ConfigNotFoundError)
+    async def not_found_handler(_: Request, exc: ConfigNotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": str(exc)})
 
-    @app.get("/api/config", dependencies=[Depends(auth)])
-    async def get_config(request: Request):
-        logger.debug(f"API: GET config [from {_client_ip(request)}]")
+    @app.exception_handler(ConfigConflictError)
+    async def conflict_handler(_: Request, exc: ConfigConflictError) -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
+
+    def notify(event: Event) -> None:
+        if notifier:
+            notifier.notify(event)
+
+    @app.get("/api/config")
+    async def get_config(ip: ClientIP):
+        logger.debug(f"API: GET config [from {ip}]")
         return {
             "check_interval": config.check_interval,
             "log_level": config.log_level,
@@ -65,112 +95,67 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
             },
         }
 
-    @app.patch("/api/config", dependencies=[Depends(auth)])
-    async def patch_config(request: Request, body: ConfigPatch):
-        ip = _client_ip(request)
-        changes = []
-
+    @app.patch("/api/config")
+    async def patch_config(ip: ClientIP, body: ConfigPatch):
         if body.check_interval is not None:
             config.update_check_interval(body.check_interval)
-            changes.append(f"check_interval={body.check_interval}")
-
-        if changes:
+            changes = [f"check_interval={body.check_interval}"]
             logger.info(f"API: updated config [{', '.join(changes)}] [from {ip}]")
-            notifier.notify_api_config_updated(ApiConfigUpdated(changes=changes, client_ip=ip))
-        return {"status": "ok"}
+            notify(ApiConfigUpdated(changes=changes, client_ip=ip))
+        return OK
 
-    @app.get("/api/config/domains", dependencies=[Depends(auth)])
-    async def list_domains(request: Request):
+    @app.get("/api/config/domains")
+    async def list_domains(ip: ClientIP):
         domains = config.domains
-        logger.debug(f"API: GET domains — {len(domains)} domain(s) [from {_client_ip(request)}]")
+        logger.debug(f"API: GET domains — {len(domains)} domain(s) [from {ip}]")
         return domains
 
-    @app.post("/api/config/domains", status_code=status.HTTP_201_CREATED, dependencies=[Depends(auth)])
-    async def add_domain(request: Request, body: DomainIn):
-        ip = _client_ip(request)
-        try:
-            config.add_domain(domain=body.domain, zones=[z.model_dump(exclude_none=True) for z in body.zones])
-        except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        logger.info(f"API: added domain '{body.domain}' with {len(body.zones)} zone(s) [from {ip}]")
-        notifier.notify_api_domain_added(
-            ApiDomainAdded(domain=body.domain, zones=[z.model_dump(exclude_none=True) for z in body.zones], client_ip=ip)
-        )
-        return {"status": "ok"}
+    @app.post("/api/config/domains", status_code=status.HTTP_201_CREATED)
+    async def add_domain(ip: ClientIP, body: DomainIn):
+        zones = [z.model_dump(exclude_none=True) for z in body.zones]
+        config.add_domain(domain=body.domain, zones=zones)
+        logger.info(f"API: added domain '{body.domain}' with {len(zones)} zone(s) [from {ip}]")
+        notify(ApiDomainAdded(domain=body.domain, zones=zones, client_ip=ip))
+        return OK
 
-    @app.delete("/api/config/domains/{domain}", dependencies=[Depends(auth)])
-    async def remove_domain(request: Request, domain: str):
-        ip = _client_ip(request)
-        if not any(d.get("domain") == domain for d in config.domains):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Domain '{domain}' not found")
+    @app.delete("/api/config/domains/{domain}")
+    async def remove_domain(ip: ClientIP, domain: str):
+        if not config.has_domain(domain):
+            raise ConfigNotFoundError(f"Domain '{domain}' not found")
         # Cleanup DNS before removing from config so zones are still readable
         await monitoring_service.cleanup_domain(domain)
         config.remove_domain(domain)
         logger.info(f"API: removed domain '{domain}' [from {ip}]")
-        notifier.notify_api_domain_removed(ApiDomainRemoved(domain=domain, client_ip=ip))
-        return {"status": "ok"}
+        notify(ApiDomainRemoved(domain=domain, client_ip=ip))
+        return OK
 
-    @app.post(
-        "/api/config/domains/{domain}/zones",
-        status_code=status.HTTP_201_CREATED,
-        dependencies=[Depends(auth)],
-    )
-    async def add_zone(request: Request, domain: str, body: ZoneIn):
-        ip = _client_ip(request)
-        try:
-            config.add_zone(domain, body.model_dump(exclude_none=True))
-        except ValueError as e:
-            code = status.HTTP_409_CONFLICT if "already exists" in str(e) else status.HTTP_404_NOT_FOUND
-            raise HTTPException(status_code=code, detail=str(e))
-        all_ips = [n.ip for n in (body.nodes or [])] + list(body.ips or [])
+    @app.post("/api/config/domains/{domain}/zones", status_code=status.HTTP_201_CREATED)
+    async def add_zone(ip: ClientIP, domain: str, body: ZoneIn):
+        config.add_zone(domain, body.model_dump(exclude_none=True))
         logger.info(
             f"API: added zone '{body.name}' to '{domain}' "
-            f"[{len(all_ips)} node(s), ttl={body.ttl}, proxied={body.proxied}] "
-            f"[from {ip}]"
+            f"[{len(body.dns_ips)} node(s), ttl={body.ttl}, proxied={body.proxied}] [from {ip}]"
         )
-        notifier.notify_api_zone_added(
-            ApiZoneAdded(
-                domain=domain, zone_name=body.name, ips=all_ips,
-                ttl=body.ttl, proxied=body.proxied, client_ip=ip,
-            )
-        )
-        return {"status": "ok"}
+        notify(ApiZoneAdded(domain=domain, zone_name=body.name, ips=body.dns_ips,
+                            ttl=body.ttl, proxied=body.proxied, client_ip=ip))
+        return OK
 
-    @app.patch("/api/config/domains/{domain}/zones/{zone_name}", dependencies=[Depends(auth)])
-    async def patch_zone(request: Request, domain: str, zone_name: str, body: ZonePatch):
-        ip = _client_ip(request)
+    @app.patch("/api/config/domains/{domain}/zones/{zone_name}")
+    async def patch_zone(ip: ClientIP, domain: str, zone_name: str, body: ZonePatch):
         updates = body.model_dump(exclude_none=True)
         if not updates:
-            return {"status": "ok"}
-        try:
-            config.update_zone(domain, zone_name, **updates)
-        except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-        log_parts = []
-        for k, v in updates.items():
-            if k == "ips":
-                log_parts.append(f"ips={', '.join(v)}")
-            elif k == "nodes":
-                log_parts.append(f"nodes={len(v)} entry(s)")
-            else:
-                log_parts.append(f"{k}={v}")
-        logger.info(f"API: updated zone '{zone_name}' of '{domain}' [{', '.join(log_parts)}] [from {ip}]")
-        notifier.notify_api_zone_updated(
-            ApiZoneUpdated(domain=domain, zone_name=zone_name, changes=updates, client_ip=ip)
-        )
-        return {"status": "ok"}
+            return OK
+        config.update_zone(domain, zone_name, **updates)
+        logger.info(f"API: updated zone '{zone_name}' of '{domain}' [{_format_changes(updates)}] [from {ip}]")
+        notify(ApiZoneUpdated(domain=domain, zone_name=zone_name, changes=updates, client_ip=ip))
+        return OK
 
-    @app.delete("/api/config/domains/{domain}/zones/{zone_name}", dependencies=[Depends(auth)])
-    async def remove_zone(request: Request, domain: str, zone_name: str):
-        ip = _client_ip(request)
-        # Validate before cleanup
-        try:
-            config.remove_zone(domain, zone_name)
-        except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    @app.delete("/api/config/domains/{domain}/zones/{zone_name}")
+    async def remove_zone(ip: ClientIP, domain: str, zone_name: str):
+        config.remove_zone(domain, zone_name)
         await monitoring_service.cleanup_zone(domain, zone_name)
         logger.info(f"API: removed zone '{zone_name}' from '{domain}' [from {ip}]")
-        notifier.notify_api_zone_removed(ApiZoneRemoved(domain=domain, zone_name=zone_name, client_ip=ip))
-        return {"status": "ok"}
+        notify(ApiZoneRemoved(domain=domain, zone_name=zone_name, client_ip=ip))
+        return OK
 
     return app

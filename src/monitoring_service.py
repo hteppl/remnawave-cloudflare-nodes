@@ -1,8 +1,20 @@
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+import asyncio
+from itertools import groupby
+from operator import attrgetter
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from .cloudflare_dns import CloudflareClient, DNSManager
-from .config import Config
-from .panel import HostManager, NodeMonitor
+from .config import Config, Zone
+from .panel import HostManager, NodeMonitor, NodeStatus
+from .telegram import (
+    CriticalState,
+    CriticalStateRecovered,
+    Event,
+    HealthCheckError,
+    NodeStateChange,
+    NodeStats,
+    ZoneStats,
+)
 from .utils.dns import build_fqdn
 from .utils.logger import get_logger
 
@@ -17,7 +29,7 @@ class MonitoringService:
             node_monitor: NodeMonitor,
             cloudflare_client: CloudflareClient,
             dns_manager: DNSManager,
-            host_manager: Optional["HostManager"] = None,
+            host_manager: Optional[HostManager] = None,
             notifier: Optional["TelegramNotifier"] = None,
     ):
         self.config = config
@@ -34,35 +46,22 @@ class MonitoringService:
     async def initialize_and_print_zones(self) -> None:
         self.logger.info("Initializing zones")
 
-        current_domain = None
-        current_zone_id: Optional[str] = None
-        for zone in self.config.get_all_zones():
-            domain = zone["domain"]
-
-            if domain != current_domain:
-                current_zone_id = await self._get_zone_id(domain)
-                current_domain = domain
-                if not current_zone_id:
-                    self.logger.warning(f"Could not find zone_id for domain {domain}")
-                    continue
-                self.logger.info(f"Domain: {domain}, Zone ID: {current_zone_id}")
-
-            if not current_zone_id:
+        for domain, zones in groupby(self.config.get_all_zones(), key=attrgetter("domain")):
+            zone_id = await self._get_zone_id(domain)
+            if not zone_id:
+                self.logger.warning(f"Could not find zone_id for domain {domain}")
                 continue
+            self.logger.info(f"Domain: {domain}, Zone ID: {zone_id}")
 
-            full_domain = build_fqdn(zone['name'], domain)
-            self.logger.info(f"  Zone: {full_domain}, TTL: {zone['ttl']}, Proxied: {zone['proxied']}")
-            for entry in zone["nodes"]:
-                note = f" (via {entry['address']})" if entry["address"] != entry["ip"] else ""
-                self.logger.info(f"    Node: {entry['ip']}{note}")
+            for zone in zones:
+                self.logger.info(f"  Zone: {zone.fqdn}, TTL: {zone.ttl}, Proxied: {zone.proxied}")
+                for entry in zone.nodes:
+                    note = f" (via {entry.address})" if entry.address != entry.ip else ""
+                    self.logger.info(f"    Node: {entry.ip}{note}")
 
-            existing_records = await self.cloudflare_client.get_dns_records(current_zone_id, name=full_domain,
-                                                                            record_type="A")
-            if existing_records:
-                existing_ips = [record["content"] for record in existing_records]
-                self.logger.info(f"  Existing DNS records: {', '.join(existing_ips)}")
-            else:
-                self.logger.info("  Existing DNS records: None")
+                records = await self.cloudflare_client.get_dns_records(zone_id, name=zone.fqdn, record_type="A")
+                existing = ", ".join(r["content"] for r in records) or "None"
+                self.logger.info(f"  Existing DNS records: {existing}")
 
         self.logger.info("Initialization complete")
 
@@ -70,35 +69,26 @@ class MonitoringService:
         self.logger.info("Starting health check cycle")
 
         try:
+            zones = self.config.get_all_zones()
             all_nodes = await self.node_monitor.check_all_nodes()
             nodes_by_address = {node.address: node for node in all_nodes}
 
-            configured_addresses = self._get_all_configured_addresses()
+            configured_addresses = {entry.address for zone in zones for entry in zone.nodes}
             configured_nodes = [n for n in all_nodes if n.address in configured_addresses]
-            healthy_nodes = [n for n in configured_nodes if n.is_healthy]
             unhealthy_nodes = [n for n in configured_nodes if not n.is_healthy]
 
             self.logger.info(
-                f"Nodes: {len(healthy_nodes)}/{len(configured_nodes)} online, {len(unhealthy_nodes)} unhealthy"
+                f"Nodes: {len(configured_nodes) - len(unhealthy_nodes)}/{len(configured_nodes)} online, "
+                f"{len(unhealthy_nodes)} unhealthy"
             )
-
             if unhealthy_nodes:
-                unhealthy_info = []
-                for node in unhealthy_nodes:
-                    reason = []
-                    if not node.is_connected:
-                        reason.append("disconnected")
-                    if node.is_disabled:
-                        reason.append("disabled")
-                    if not (node.versions and node.versions.xray):
-                        reason.append("no xray")
-                    unhealthy_info.append(f"{node.address} ({', '.join(reason)})")
-                self.logger.info(f"Unhealthy nodes: {'; '.join(unhealthy_info)}")
+                details = "; ".join(f"{n.address} ({', '.join(n.unhealthy_reasons)})" for n in unhealthy_nodes)
+                self.logger.info(f"Unhealthy nodes: {details}")
 
-            self._check_node_transitions(configured_nodes, nodes_by_address)
+            self._check_node_transitions(configured_nodes, self._group_nodes_by_zone(zones, nodes_by_address))
             self._check_critical_state(configured_nodes, unhealthy_nodes)
 
-            active_fqdns, managed_fqdns = await self._sync_all_zones(nodes_by_address)
+            active_fqdns, managed_fqdns = await self._sync_all_zones(zones, nodes_by_address)
 
             if self.host_manager:
                 await self.host_manager.sync_host_states(active_fqdns, managed_fqdns)
@@ -107,191 +97,145 @@ class MonitoringService:
 
         except Exception as e:
             self.logger.error(f"Error during health check: {e}", exc_info=True)
-            if self.notifier and self.config.telegram_notify_errors:
-                from .telegram import HealthCheckError
-
-                self.notifier.notify_health_check_error(HealthCheckError(error_message=str(e)))
+            self._notify(HealthCheckError(error_message=str(e)))
             raise
 
-    def _get_all_configured_addresses(self) -> Set[str]:
-        addresses: Set[str] = set()
-        for zone in self.config.get_all_zones():
-            for entry in zone["nodes"]:
-                addresses.add(entry["address"])
-        return addresses
-
-    async def _sync_all_zones(self, nodes_by_address: Dict[str, object]) -> tuple[Set[str], Set[str]]:
-        active_fqdns: Set[str] = set()
-        managed_fqdns: Set[str] = set()
-
-        for zone in self.config.get_all_zones():
-            domain = zone["domain"]
-
-            zone_id = await self._get_zone_id(domain)
-            if not zone_id:
-                self.logger.warning(f"Could not find zone_id for domain {domain}, skipping")
-                continue
-
-            configured_ips: List[str] = []
-            healthy_ips: Set[str] = set()
-            for entry in zone["nodes"]:
-                dns_ip = entry["ip"]
-                configured_ips.append(dns_ip)
-                node = nodes_by_address.get(entry["address"])
-                if node and node.is_healthy:
-                    healthy_ips.add(dns_ip)
-
-            full_domain = build_fqdn(zone["name"], domain)
-            managed_fqdns.add(full_domain)
-
-            active_ips = await self.dns_manager.sync_dns_records(
-                zone_id=zone_id,
-                zone_name=zone["name"],
-                domain=domain,
-                configured_ips=configured_ips,
-                healthy_ips=healthy_ips,
-                ttl=zone["ttl"],
-                proxied=zone["proxied"],
-            )
-
-            if active_ips:
-                active_fqdns.add(full_domain)
-
-        return active_fqdns, managed_fqdns
-
-    async def _get_zone_id(self, domain: str) -> Optional[str]:
-        if domain in self._zone_id_cache:
-            return self._zone_id_cache[domain]
-
-        zone_id = await self.cloudflare_client.get_zone_id_by_domain(domain)
-        if zone_id:
-            self._zone_id_cache[domain] = zone_id
-
-        return zone_id
-
-    def _check_node_transitions(self, nodes, nodes_by_address: Dict[str, object]) -> None:
-        if not self.notifier or not self.config.telegram_notify_node_changes:
-            return
-
-        from .telegram import NodeStateChange, NodeStats, ZoneStats
-
-        total = len(nodes)
-        disabled = sum(1 for n in nodes if n.is_disabled)
-
-        zone_nodes: Dict[str, list] = {}
-        for zone in self.config.get_all_zones():
-            key = build_fqdn(zone['name'], zone['domain'])
-            seen: Set[str] = set()
-            zone_node_list = []
-            for entry in zone["nodes"]:
-                node = nodes_by_address.get(entry["address"])
-                if node and node.address not in seen:
-                    zone_node_list.append(node)
-                    seen.add(node.address)
-            zone_nodes[key] = zone_node_list
-
-        online = sum(1 for n in nodes if self._previous_node_states.get(n.address, n.is_healthy))
-        zone_online: Dict[str, int] = {
-            key: sum(1 for n in znodes if self._previous_node_states.get(n.address, n.is_healthy))
-            for key, znodes in zone_nodes.items()
-        }
-
-        for node in nodes:
-            prev_healthy = self._previous_node_states.get(node.address)
-            curr_healthy = node.is_healthy
-
-            if prev_healthy is None:
-                self._previous_node_states[node.address] = curr_healthy
-                continue
-
-            if prev_healthy == curr_healthy:
-                continue
-
-            delta = 1 if curr_healthy else -1
-            online += delta
-
-            node_zone: Optional[ZoneStats] = None
-            for key, znodes in zone_nodes.items():
-                if any(n.address == node.address for n in znodes):
-                    zone_online[key] += delta
-                    node_zone = ZoneStats(
-                        name=key,
-                        total=len(znodes),
-                        online=zone_online[key],
-                        offline=len(znodes) - zone_online[key],
-                    )
-                    break
-
-            zones_stats = [node_zone] if node_zone else []
-
-            stats = NodeStats(
-                total=total,
-                online=online,
-                offline=total - online,
-                disabled=disabled,
-                zones=zones_stats,
-            )
-
-            reason = None
-            if not curr_healthy:
-                reasons = []
-                if not node.is_connected:
-                    reasons.append("disconnected")
-                if node.is_disabled:
-                    reasons.append("disabled")
-                if not (node.versions and node.versions.xray):
-                    reasons.append("no xray")
-                reason = ", ".join(reasons) if reasons else "unknown"
-
-            self.notifier.notify_node_state_change(
-                NodeStateChange(
-                    node_name=node.name,
-                    node_address=node.address,
-                    previous_healthy=prev_healthy,
-                    current_healthy=curr_healthy,
-                    stats=stats,
-                    reason=reason,
-                )
-            )
-
-            self._previous_node_states[node.address] = curr_healthy
-
     async def cleanup_zone(self, domain: str, zone_name: str) -> None:
+        fqdn = build_fqdn(zone_name, domain)
         zone_id = await self._get_zone_id(domain)
         if not zone_id:
-            self.logger.warning(f"Cannot cleanup {build_fqdn(zone_name, domain)}: zone_id not found")
+            self.logger.warning(f"Cannot cleanup {fqdn}: zone_id not found")
             return
-        await self.dns_manager.cleanup_zone(zone_id, zone_name, domain)
+        await self.dns_manager.cleanup(zone_id, fqdn)
 
     async def cleanup_domain(self, domain: str) -> None:
         zone_id = await self._get_zone_id(domain)
         if not zone_id:
             self.logger.warning(f"Cannot cleanup domain {domain}: zone_id not found")
             return
-        for domain_conf in self.config.domains:
-            if domain_conf.get("domain") == domain:
-                for zone in domain_conf.get("zones") or []:
-                    await self.dns_manager.cleanup_zone(zone_id, zone["name"], domain)
-                return
+        for zone in self.config.get_all_zones():
+            if zone.domain == domain:
+                await self.dns_manager.cleanup(zone_id, zone.fqdn)
 
-    def _check_critical_state(self, configured_nodes, unhealthy_nodes) -> None:
-        if not self.notifier or not self.config.telegram_notify_critical:
-            return
+    # --- Internals ---
 
+    def _notify(self, event: Event) -> None:
+        if self.notifier:
+            self.notifier.notify(event)
+
+    async def _get_zone_id(self, domain: str) -> Optional[str]:
+        if domain not in self._zone_id_cache:
+            zone_id = await self.cloudflare_client.get_zone_id_by_domain(domain)
+            if not zone_id:
+                return None
+            self._zone_id_cache[domain] = zone_id
+        return self._zone_id_cache[domain]
+
+    async def _sync_all_zones(
+            self, zones: List[Zone], nodes_by_address: Dict[str, NodeStatus]
+    ) -> Tuple[Set[str], Set[str]]:
+        """Sync all zones concurrently; returns (fqdns with published records, all managed fqdns)."""
+        zone_ids: Dict[str, Optional[str]] = {}
+        for domain in dict.fromkeys(zone.domain for zone in zones):
+            zone_ids[domain] = await self._get_zone_id(domain)
+            if not zone_ids[domain]:
+                self.logger.warning(f"Could not find zone_id for domain {domain}, skipping")
+
+        syncable = [zone for zone in zones if zone_ids[zone.domain]]
+
+        def healthy_ips(zone: Zone) -> Set[str]:
+            return {
+                entry.ip for entry in zone.nodes
+                if (node := nodes_by_address.get(entry.address)) and node.is_healthy
+            }
+
+        results = await asyncio.gather(
+            *(
+                self.dns_manager.sync(
+                    zone_id=zone_ids[zone.domain],
+                    fqdn=zone.fqdn,
+                    configured_ips=zone.ips,
+                    healthy_ips=healthy_ips(zone),
+                    ttl=zone.ttl,
+                    proxied=zone.proxied,
+                )
+                for zone in syncable
+            ),
+            return_exceptions=True,
+        )
+        if errors := [r for r in results if isinstance(r, BaseException)]:
+            raise errors[0]
+
+        active_fqdns = {zone.fqdn for zone, published in zip(syncable, results) if published}
+        managed_fqdns = {zone.fqdn for zone in syncable}
+        return active_fqdns, managed_fqdns
+
+    @staticmethod
+    def _group_nodes_by_zone(
+            zones: List[Zone], nodes_by_address: Dict[str, NodeStatus]
+    ) -> Dict[str, List[NodeStatus]]:
+        """Map each zone FQDN to its unique, known nodes."""
+        result: Dict[str, List[NodeStatus]] = {}
+        for zone in zones:
+            addresses = dict.fromkeys(entry.address for entry in zone.nodes)
+            result[zone.fqdn] = [nodes_by_address[a] for a in addresses if a in nodes_by_address]
+        return result
+
+    def _check_node_transitions(self, nodes: List[NodeStatus], zone_nodes: Dict[str, List[NodeStatus]]) -> None:
+        previous = self._previous_node_states
+
+        def was_online(node: NodeStatus) -> bool:
+            return previous.get(node.address, node.is_healthy)
+
+        total = len(nodes)
+        disabled = sum(n.is_disabled for n in nodes)
+        online = sum(map(was_online, nodes))
+        zone_online = {fqdn: sum(map(was_online, znodes)) for fqdn, znodes in zone_nodes.items()}
+
+        # A node reports stats for the first zone it belongs to
+        zone_of: Dict[str, str] = {}
+        for fqdn, znodes in zone_nodes.items():
+            for n in znodes:
+                zone_of.setdefault(n.address, fqdn)
+
+        for node in nodes:
+            prev_healthy = previous.get(node.address)
+            previous[node.address] = node.is_healthy
+            if prev_healthy is None or prev_healthy == node.is_healthy:
+                continue
+
+            delta = 1 if node.is_healthy else -1
+            online += delta
+
+            zones_stats = []
+            if fqdn := zone_of.get(node.address):
+                zone_online[fqdn] += delta
+                zones_stats.append(ZoneStats(name=fqdn, total=len(zone_nodes[fqdn]), online=zone_online[fqdn]))
+
+            self._notify(
+                NodeStateChange(
+                    node_name=node.name,
+                    node_address=node.address,
+                    previous_healthy=prev_healthy,
+                    current_healthy=node.is_healthy,
+                    stats=NodeStats(total=total, online=online, disabled=disabled, zones=zones_stats),
+                    reason=None if node.is_healthy else ", ".join(node.unhealthy_reasons) or "unknown",
+                )
+            )
+
+    def _check_critical_state(self, configured_nodes: List[NodeStatus], unhealthy_nodes: List[NodeStatus]) -> None:
         all_down = 0 < len(configured_nodes) == len(unhealthy_nodes)
 
         if all_down and not self._previous_all_down:
-            from .telegram import CriticalState
-
-            self.notifier.notify_critical_state(
+            self._notify(
                 CriticalState(total_nodes=len(configured_nodes), down_nodes=[n.address for n in unhealthy_nodes])
             )
         elif not all_down and self._previous_all_down:
-            from .telegram import CriticalStateRecovered
-
-            online_count = len(configured_nodes) - len(unhealthy_nodes)
-            self.notifier.notify_critical_recovered(
-                CriticalStateRecovered(total_nodes=len(configured_nodes), online_nodes=online_count)
+            self._notify(
+                CriticalStateRecovered(
+                    total_nodes=len(configured_nodes),
+                    online_nodes=len(configured_nodes) - len(unhealthy_nodes),
+                )
             )
 
         self._previous_all_down = all_down

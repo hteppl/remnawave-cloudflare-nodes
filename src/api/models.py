@@ -21,6 +21,10 @@ class ZoneIn(BaseModel):
             raise ValueError("At least one of 'ips' or 'nodes' must be provided")
         return self
 
+    @property
+    def dns_ips(self) -> List[str]:
+        return [n.ip for n in self.nodes or []] + list(self.ips or [])
+
 
 class ZonePatch(BaseModel):
     ttl: Optional[int] = Field(default=None, ge=1)
