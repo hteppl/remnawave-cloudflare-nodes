@@ -1,6 +1,6 @@
 from typing import Any, List
+from uuid import UUID
 
-import httpx
 from remnawave import RemnawaveSDK
 from remnawave.models import HostResponseDto, NodeResponseDto
 
@@ -36,22 +36,10 @@ class RemnawaveClient:
         self.logger.debug(f"Fetched {len(hosts)} hosts")
         return hosts
 
-    async def set_hosts_enabled(self, uuids: List[str], enabled: bool) -> List[HostResponseDto]:
-        """Bulk enable/disable hosts.
-
-        Calls the REST endpoint directly to work around an SDK bug: BulkDisable/EnableHostsResponseDto
-        are list subclasses not supported by the rapid client's _handle_response parser.
-        """
+    async def set_hosts_enabled(self, uuids: List[str], enabled: bool) -> None:
+        """Bulk enable/disable hosts; raises on API errors."""
         if not uuids:
             raise ValueError("No host UUIDs provided")
-        action = "enable" if enabled else "disable"
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.api_url}/api/hosts/bulk/{action}",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={"uuids": [str(u) for u in uuids]},
-            )
-        response.raise_for_status()
-        data = response.json()
-        items = data.get("response", []) if isinstance(data, dict) else data
-        return [HostResponseDto.model_validate(item) for item in items or []]
+        bulk = self.sdk.hosts_bulk_actions
+        action = bulk.enable_hosts if enabled else bulk.disable_hosts
+        await action(uuids=[UUID(u) for u in uuids])
