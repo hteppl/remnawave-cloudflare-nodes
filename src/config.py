@@ -102,10 +102,6 @@ class Config:
             return 8741
 
     @property
-    def api_docs_enabled(self) -> bool:
-        return _env_bool("API_DOCS")
-
-    @property
     def api_token(self) -> str:
         return os.getenv("API_TOKEN", "")
 

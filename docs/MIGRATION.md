@@ -15,7 +15,6 @@ Take the values from your current `config.yml` and add the corresponding environ
 | `api.enabled`                  | `API_ENABLED`                  | `false`   |
 | `api.host`                     | `API_HOST`                     | `0.0.0.0` |
 | `api.port`                     | `API_PORT`                     | `8741`    |
-| `api.docs`                     | `API_DOCS`                     | `false`   |
 | `telegram.enabled`             | `TELEGRAM_ENABLED`             | `false`   |
 | `telegram.locale`              | `LANGUAGE`                     | `en`      |
 | `telegram.notify.node_changes` | `TELEGRAM_NOTIFY_NODE_CHANGES` | `true`    |
@@ -34,7 +33,6 @@ api:
   enabled: true
   host: "0.0.0.0"
   port: 8741
-  docs: true
 
 telegram:
   enabled: true
@@ -55,7 +53,6 @@ LOG_LEVEL=DEBUG
 API_ENABLED=true
 API_HOST=0.0.0.0
 API_PORT=8741
-API_DOCS=true
 
 TELEGRAM_ENABLED=true
 LANGUAGE=ru

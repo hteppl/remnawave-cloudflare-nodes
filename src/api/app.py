@@ -36,8 +36,9 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
     app = FastAPI(
         title="Remnawave Cloudflare DNS Monitor",
         version="1.0.0",
-        docs_url="/api/docs" if config.api_docs_enabled else None,
+        docs_url=None,
         redoc_url=None,
+        openapi_url=None,
     )
 
     auth = make_auth_dependency(config.api_token)

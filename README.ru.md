@@ -56,7 +56,6 @@ API_ENABLED=false
 API_TOKEN=  # Сгенерировать: openssl rand -hex 32
 API_HOST=0.0.0.0
 API_PORT=8741
-API_DOCS=false
 
 # Telegram-уведомления
 TELEGRAM_ENABLED=false
@@ -186,7 +185,6 @@ zones:
 | `API_ENABLED`                  | Включить HTTP API                                | `false`             | Нет                |
 | `API_HOST`                     | Адрес привязки API-сервера                       | `0.0.0.0`           | Нет                |
 | `API_PORT`                     | Порт API-сервера                                 | `8741`              | Нет                |
-| `API_DOCS`                     | Swagger UI по адресу `/api/docs`                 | `false`             | Нет                |
 | `API_TOKEN`                    | Токен API — строго 64 символа hex                | -                   | При включенном API |
 | `TELEGRAM_ENABLED`             | Включить Telegram-уведомления                    | `false`             | Нет                |
 | `TELEGRAM_BOT_TOKEN`           | Токен бота (@BotFather)                          | -                   | Нет                |
@@ -323,7 +321,8 @@ TELEGRAM_NOTIFY_API_CHANGES=true    # Изменения через HTTP API
 
 Сервис включает опциональный REST API для управления конфигурацией в реальном времени.
 
-Полная документация: **[docs/API.md](docs/API.md)**
+Эндпоинты и примеры кода: [`docs/AI_INTEGRATION_GUIDE.md`](docs/AI_INTEGRATION_GUIDE.md), OpenAPI-схема:
+[`docs/openapi/openapi.json`](docs/openapi/openapi.json).
 
 ### Быстрый старт
 
@@ -340,7 +339,6 @@ API_ENABLED=true
 API_TOKEN=<сгенерированный токен>
 API_HOST=0.0.0.0
 API_PORT=8741
-API_DOCS=false
 ```
 
 ### Reverse proxy

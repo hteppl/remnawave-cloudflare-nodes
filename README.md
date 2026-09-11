@@ -57,7 +57,6 @@ API_ENABLED=false
 API_TOKEN=  # Generate a strong random value: openssl rand -hex 32
 API_HOST=0.0.0.0
 API_PORT=8741
-API_DOCS=false
 
 # Telegram notifications
 TELEGRAM_ENABLED=false
@@ -190,7 +189,6 @@ Both formats can be mixed within the same zone or across different zones.
 | `API_ENABLED`                  | Enable the HTTP API server                     | `false`             | No               |
 | `API_HOST`                     | Address to bind the API server                 | `0.0.0.0`           | No               |
 | `API_PORT`                     | Port for the API server                        | `8741`              | No               |
-| `API_DOCS`                     | Enable Swagger UI at `/api/docs`               | `false`             | No               |
 | `API_TOKEN`                    | API auth token — must be 64-char hex string    | -                   | When API enabled |
 | `TELEGRAM_ENABLED`             | Enable Telegram notifications                  | `false`             | No               |
 | `TELEGRAM_BOT_TOKEN`           | Telegram bot token from @BotFather             | -                   | No               |
@@ -354,7 +352,8 @@ TELEGRAM_NOTIFY_API_CHANGES=true    # HTTP API config changes
 
 The service includes an optional REST API for managing configuration at runtime.
 
-See **[docs/API.md](docs/API.md)** for the full API reference.
+See [`docs/AI_INTEGRATION_GUIDE.md`](docs/AI_INTEGRATION_GUIDE.md) for endpoints and code snippets, or the OpenAPI
+schema in [`docs/openapi/openapi.json`](docs/openapi/openapi.json).
 
 ### Quick start
 
@@ -371,7 +370,6 @@ API_ENABLED=true
 API_TOKEN=<generated token>
 API_HOST=0.0.0.0
 API_PORT=8741
-API_DOCS=false
 ```
 
 ### Reverse proxy

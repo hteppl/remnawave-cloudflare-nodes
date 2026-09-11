@@ -1,0 +1,43 @@
+name: Export OpenAPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  export:
+    name: Export OpenAPI Schema
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: master
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+
+      - name: Export OpenAPI schema
+        run: python scripts/export_openapi.py docs/openapi
+        env:
+          APP_VERSION: ${{ github.event.release.tag_name || 'dev' }}
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/openapi/
+          git diff --cached --quiet && echo "No OpenAPI changes" && exit 0
+          git commit -m "docs(openapi): update OpenAPI schema for ${{ github.event.release.tag_name || 'manual' }} [skip ci]"
+          git push
