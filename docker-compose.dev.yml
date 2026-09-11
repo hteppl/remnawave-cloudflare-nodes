@@ -10,6 +10,7 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./config.yml:/app/config.yml
+      - ./hosts.yml:/app/hosts.yml
       - ./logs:/app/logs
     networks:
       - remnawave-cloudflare-nodes

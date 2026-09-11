@@ -31,7 +31,8 @@ class DNSManager:
             healthy_ips: Set[str],
             ttl: int = 120,
             proxied: bool = False,
-    ) -> None:
+    ) -> Set[str]:
+        """Synchronize DNS records and return the set of IPs that are actively published."""
         full_domain = build_fqdn(zone_name, domain)
 
         existing_records = await self.client.get_dns_records(zone_id, name=full_domain, record_type="A")
@@ -67,6 +68,8 @@ class DNSManager:
                 self.logger.info(f"{full_domain}: {status}, unhealthy: {', '.join(unhealthy_ips)}")
             else:
                 self.logger.info(f"{full_domain}: {status}")
+
+        return existing_ips | healthy_configured_ips
 
     async def _add_record(
             self, zone_id: str, full_domain: str, domain: str, zone_name: str, ip: str, ttl: int, proxied: bool

@@ -92,3 +92,11 @@ api-zone-updated = <b>⚙️ Зона обновлена через API</b>
 api-zone-removed = <b>➖ Зона удалена через API</b>
     { $fqdn }
     От: { $ip }
+
+# Изменения состояния хостов
+host-enabled = • { $remark } включен ✅
+host-disabled = • { $remark } отключен ❌
+host-group-enabled = <i>Некоторые ноды, управляющие { $address }, работают</i>
+host-group-disabled = <i>Все ноды, управляющие { $address }, недоступны</i>
+host-state-change = <b>🔧 Изменение состояния хостов</b>
+    { $changes }

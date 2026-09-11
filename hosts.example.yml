@@ -1,0 +1,16 @@
+# Optional hosts safelist
+# When this file is present, the monitor ONLY enables/disables hosts whose
+# UUID appears in the list below. Hosts not listed here are left untouched.
+#
+# If this file is absent or empty, the monitor falls back to managing ALL
+# Remnawave hosts whose address matches a managed zone.
+#
+# Use the Remnawave panel or API to find host UUIDs.
+
+hosts:
+  - uuid: 234d57yf-xxxx-xxxx-xxxx-25c45kdbeae2
+    # Optional: human-readable label for your own reference (not used by the app)
+    label: "🇩🇪Germany — Stable"
+
+  # - uuid: another-uuid-here
+  #   label: "🇦🇶 Country — TagName"

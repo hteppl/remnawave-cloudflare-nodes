@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 
 from .events import (
     NodeStateChange, DNSChange, DNSError, CriticalState, CriticalStateRecovered, HealthCheckError,
-    ServiceStarted,
+    ServiceStarted, HostStateChange,
     ApiConfigUpdated, ApiDomainAdded, ApiDomainRemoved,
     ApiZoneAdded, ApiZoneUpdated, ApiZoneRemoved,
 )
@@ -191,6 +191,12 @@ class TelegramNotifier:
         if not self.enabled:
             return
         message = self._formatter.format_service_stopped()
+        self._enqueue(message)
+
+    def notify_host_state_change(self, change: HostStateChange) -> None:
+        if not self.enabled:
+            return
+        message = self._formatter.format_host_state_change(change)
         self._enqueue(message)
 
     def notify_api_config_updated(self, event: ApiConfigUpdated) -> None:
