@@ -90,7 +90,7 @@ class MonitoringService:
                         reason.append("disconnected")
                     if node.is_disabled:
                         reason.append("disabled")
-                    if not node.xray_version:
+                    if not (node.versions and node.versions.xray):
                         reason.append("no xray")
                     unhealthy_info.append(f"{node.address} ({', '.join(reason)})")
                 self.logger.info(f"Unhealthy nodes: {'; '.join(unhealthy_info)}")
@@ -239,7 +239,7 @@ class MonitoringService:
                     reasons.append("disconnected")
                 if node.is_disabled:
                     reasons.append("disabled")
-                if not node.xray_version:
+                if not (node.versions and node.versions.xray):
                     reasons.append("no xray")
                 reason = ", ".join(reasons) if reasons else "unknown"
 
