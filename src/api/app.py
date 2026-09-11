@@ -9,12 +9,12 @@ from ..config import Config, ConfigConflictError, ConfigNotFoundError
 from ..telegram import (
     Event,
     TelegramNotifier,
-    ApiConfigUpdated,
-    ApiDomainAdded,
-    ApiDomainRemoved,
-    ApiZoneAdded,
-    ApiZoneUpdated,
-    ApiZoneRemoved,
+    APIConfigUpdated,
+    APIDomainAdded,
+    APIDomainRemoved,
+    APIZoneAdded,
+    APIZoneUpdated,
+    APIZoneRemoved,
 )
 from ..utils.logger import get_logger
 
@@ -101,7 +101,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
             config.update_check_interval(body.check_interval)
             changes = [f"check_interval={body.check_interval}"]
             logger.info(f"API: updated config [{', '.join(changes)}] [from {ip}]")
-            notify(ApiConfigUpdated(changes=changes, client_ip=ip))
+            notify(APIConfigUpdated(changes=changes, client_ip=ip))
         return OK
 
     @app.get("/api/config/domains")
@@ -115,7 +115,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
         zones = [z.model_dump(exclude_none=True) for z in body.zones]
         config.add_domain(domain=body.domain, zones=zones)
         logger.info(f"API: added domain '{body.domain}' with {len(zones)} zone(s) [from {ip}]")
-        notify(ApiDomainAdded(domain=body.domain, zones=zones, client_ip=ip))
+        notify(APIDomainAdded(domain=body.domain, zones=zones, client_ip=ip))
         return OK
 
     @app.delete("/api/config/domains/{domain}")
@@ -126,7 +126,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
         await monitoring_service.cleanup_domain(domain)
         config.remove_domain(domain)
         logger.info(f"API: removed domain '{domain}' [from {ip}]")
-        notify(ApiDomainRemoved(domain=domain, client_ip=ip))
+        notify(APIDomainRemoved(domain=domain, client_ip=ip))
         return OK
 
     @app.post("/api/config/domains/{domain}/zones", status_code=status.HTTP_201_CREATED)
@@ -136,7 +136,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
             f"API: added zone '{body.name}' to '{domain}' "
             f"[{len(body.dns_ips)} node(s), ttl={body.ttl}, proxied={body.proxied}] [from {ip}]"
         )
-        notify(ApiZoneAdded(domain=domain, zone_name=body.name, ips=body.dns_ips,
+        notify(APIZoneAdded(domain=domain, zone_name=body.name, ips=body.dns_ips,
                             ttl=body.ttl, proxied=body.proxied, client_ip=ip))
         return OK
 
@@ -147,7 +147,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
             return OK
         config.update_zone(domain, zone_name, **updates)
         logger.info(f"API: updated zone '{zone_name}' of '{domain}' [{_format_changes(updates)}] [from {ip}]")
-        notify(ApiZoneUpdated(domain=domain, zone_name=zone_name, changes=updates, client_ip=ip))
+        notify(APIZoneUpdated(domain=domain, zone_name=zone_name, changes=updates, client_ip=ip))
         return OK
 
     @app.delete("/api/config/domains/{domain}/zones/{zone_name}")
@@ -155,7 +155,7 @@ def create_app(config: Config, notifier: TelegramNotifier, monitoring_service: "
         config.remove_zone(domain, zone_name)
         await monitoring_service.cleanup_zone(domain, zone_name)
         logger.info(f"API: removed zone '{zone_name}' from '{domain}' [from {ip}]")
-        notify(ApiZoneRemoved(domain=domain, zone_name=zone_name, client_ip=ip))
+        notify(APIZoneRemoved(domain=domain, zone_name=zone_name, client_ip=ip))
         return OK
 
     return app

@@ -11,7 +11,7 @@ from .config import Config
 from .hosts_config import HostsConfig
 from .i18n import get_translator
 from .monitoring_service import MonitoringService
-from .panel import RemnawaveClient, NodeMonitor, HostManager
+from .remnawave_panel import RemnawaveClient, NodeMonitor, HostManager
 from .telegram import EventCategory, ServiceStarted, ServiceStopped, TelegramNotifier, ZoneSummary
 from .utils.logger import setup_logger
 
@@ -47,7 +47,7 @@ async def run_monitoring_loop(service: MonitoringService, config: Config, logger
 
     while True:
         try:
-            await service.perform_health_check()
+            await service.run_health_check()
             logger.info(f"Waiting {config.check_interval} seconds until next check...")
         except Exception as e:
             logger.info(f"Retrying in {config.check_interval} seconds after error: {e}")
@@ -72,7 +72,6 @@ async def main():
         muted=muted_categories(config),
     )
     remnawave_client = RemnawaveClient(api_url=config.remnawave_url, api_key=config.remnawave_api_key)
-    cloudflare_client = CloudflareClient(api_token=config.cloudflare_token)
     host_manager = HostManager(
         client=remnawave_client,
         notifier=notifier,
@@ -82,8 +81,7 @@ async def main():
     monitoring_service = MonitoringService(
         config=config,
         node_monitor=NodeMonitor(remnawave_client),
-        cloudflare_client=cloudflare_client,
-        dns_manager=DNSManager(client=cloudflare_client, notifier=notifier),
+        dns_manager=DNSManager(client=CloudflareClient(api_token=config.cloudflare_token), notifier=notifier),
         host_manager=host_manager,
         notifier=notifier,
     )
@@ -113,7 +111,7 @@ async def main():
             )
         )
 
-        await monitoring_service.initialize_and_print_zones()
+        await monitoring_service.initialize()
 
         if config.api_enabled:
             from .api import create_app

@@ -3,9 +3,9 @@ from itertools import groupby
 from operator import attrgetter
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
-from .cloudflare_dns import CloudflareClient, DNSManager
+from .cloudflare_dns import DNSManager
 from .config import Config, Zone
-from .panel import HostManager, NodeMonitor, NodeStatus
+from .remnawave_panel import HostManager, NodeMonitor, NodeStatus
 from .telegram import (
     CriticalState,
     CriticalStateRecovered,
@@ -27,27 +27,24 @@ class MonitoringService:
             self,
             config: Config,
             node_monitor: NodeMonitor,
-            cloudflare_client: CloudflareClient,
             dns_manager: DNSManager,
             host_manager: Optional[HostManager] = None,
             notifier: Optional["TelegramNotifier"] = None,
     ):
         self.config = config
         self.node_monitor = node_monitor
-        self.cloudflare_client = cloudflare_client
         self.dns_manager = dns_manager
         self.host_manager = host_manager
         self.notifier = notifier
         self.logger = get_logger(__name__)
-        self._zone_id_cache: Dict[str, str] = {}
         self._previous_node_states: Dict[str, bool] = {}
         self._previous_all_down: bool = False
 
-    async def initialize_and_print_zones(self) -> None:
+    async def initialize(self) -> None:
         self.logger.info("Initializing zones")
 
         for domain, zones in groupby(self.config.get_all_zones(), key=attrgetter("domain")):
-            zone_id = await self._get_zone_id(domain)
+            zone_id = await self.dns_manager.get_zone_id(domain)
             if not zone_id:
                 self.logger.warning(f"Could not find zone_id for domain {domain}")
                 continue
@@ -59,18 +56,17 @@ class MonitoringService:
                     note = f" (via {entry.address})" if entry.address != entry.ip else ""
                     self.logger.info(f"    Node: {entry.ip}{note}")
 
-                records = await self.cloudflare_client.get_dns_records(zone_id, name=zone.fqdn, record_type="A")
-                existing = ", ".join(r["content"] for r in records) or "None"
+                existing = ", ".join(await self.dns_manager.get_record_ips(zone_id, zone.fqdn)) or "None"
                 self.logger.info(f"  Existing DNS records: {existing}")
 
         self.logger.info("Initialization complete")
 
-    async def perform_health_check(self) -> None:
+    async def run_health_check(self) -> None:
         self.logger.info("Starting health check cycle")
 
         try:
             zones = self.config.get_all_zones()
-            all_nodes = await self.node_monitor.check_all_nodes()
+            all_nodes = await self.node_monitor.check_nodes()
             nodes_by_address = {node.address: node for node in all_nodes}
 
             configured_addresses = {entry.address for zone in zones for entry in zone.nodes}
@@ -85,13 +81,13 @@ class MonitoringService:
                 details = "; ".join(f"{n.address} ({', '.join(n.unhealthy_reasons)})" for n in unhealthy_nodes)
                 self.logger.info(f"Unhealthy nodes: {details}")
 
-            self._check_node_transitions(configured_nodes, self._group_nodes_by_zone(zones, nodes_by_address))
-            self._check_critical_state(configured_nodes, unhealthy_nodes)
+            self._report_node_transitions(configured_nodes, self._group_nodes_by_zone(zones, nodes_by_address))
+            self._report_critical_state(configured_nodes, unhealthy_nodes)
 
             active_fqdns, managed_fqdns = await self._sync_all_zones(zones, nodes_by_address)
 
             if self.host_manager:
-                await self.host_manager.sync_host_states(active_fqdns, managed_fqdns)
+                await self.host_manager.sync(active_fqdns, managed_fqdns)
 
             self.logger.info("Health check cycle completed")
 
@@ -102,14 +98,14 @@ class MonitoringService:
 
     async def cleanup_zone(self, domain: str, zone_name: str) -> None:
         fqdn = build_fqdn(zone_name, domain)
-        zone_id = await self._get_zone_id(domain)
+        zone_id = await self.dns_manager.get_zone_id(domain)
         if not zone_id:
             self.logger.warning(f"Cannot cleanup {fqdn}: zone_id not found")
             return
         await self.dns_manager.cleanup(zone_id, fqdn)
 
     async def cleanup_domain(self, domain: str) -> None:
-        zone_id = await self._get_zone_id(domain)
+        zone_id = await self.dns_manager.get_zone_id(domain)
         if not zone_id:
             self.logger.warning(f"Cannot cleanup domain {domain}: zone_id not found")
             return
@@ -123,21 +119,13 @@ class MonitoringService:
         if self.notifier:
             self.notifier.notify(event)
 
-    async def _get_zone_id(self, domain: str) -> Optional[str]:
-        if domain not in self._zone_id_cache:
-            zone_id = await self.cloudflare_client.get_zone_id_by_domain(domain)
-            if not zone_id:
-                return None
-            self._zone_id_cache[domain] = zone_id
-        return self._zone_id_cache[domain]
-
     async def _sync_all_zones(
             self, zones: List[Zone], nodes_by_address: Dict[str, NodeStatus]
     ) -> Tuple[Set[str], Set[str]]:
         """Sync all zones concurrently; returns (fqdns with published records, all managed fqdns)."""
         zone_ids: Dict[str, Optional[str]] = {}
         for domain in dict.fromkeys(zone.domain for zone in zones):
-            zone_ids[domain] = await self._get_zone_id(domain)
+            zone_ids[domain] = await self.dns_manager.get_zone_id(domain)
             if not zone_ids[domain]:
                 self.logger.warning(f"Could not find zone_id for domain {domain}, skipping")
 
@@ -181,7 +169,7 @@ class MonitoringService:
             result[zone.fqdn] = [nodes_by_address[a] for a in addresses if a in nodes_by_address]
         return result
 
-    def _check_node_transitions(self, nodes: List[NodeStatus], zone_nodes: Dict[str, List[NodeStatus]]) -> None:
+    def _report_node_transitions(self, nodes: List[NodeStatus], zone_nodes: Dict[str, List[NodeStatus]]) -> None:
         previous = self._previous_node_states
 
         def was_online(node: NodeStatus) -> bool:
@@ -223,7 +211,7 @@ class MonitoringService:
                 )
             )
 
-    def _check_critical_state(self, configured_nodes: List[NodeStatus], unhealthy_nodes: List[NodeStatus]) -> None:
+    def _report_critical_state(self, configured_nodes: List[NodeStatus], unhealthy_nodes: List[NodeStatus]) -> None:
         all_down = 0 < len(configured_nodes) == len(unhealthy_nodes)
 
         if all_down and not self._previous_all_down:

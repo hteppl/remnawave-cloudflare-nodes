@@ -132,31 +132,31 @@ class HostStateChange(Event):
 # API events
 
 @dataclass
-class ApiEvent(Event):
+class APIEvent(Event):
     category = EventCategory.API
 
 
 @dataclass
-class ApiConfigUpdated(ApiEvent):
+class APIConfigUpdated(APIEvent):
     changes: List[str]
     client_ip: str
 
 
 @dataclass
-class ApiDomainAdded(ApiEvent):
+class APIDomainAdded(APIEvent):
     domain: str
     zones: List[dict]
     client_ip: str
 
 
 @dataclass
-class ApiDomainRemoved(ApiEvent):
+class APIDomainRemoved(APIEvent):
     domain: str
     client_ip: str
 
 
 @dataclass
-class ApiZoneAdded(ApiEvent):
+class APIZoneAdded(APIEvent):
     domain: str
     zone_name: str
     ips: List[str]
@@ -166,7 +166,7 @@ class ApiZoneAdded(ApiEvent):
 
 
 @dataclass
-class ApiZoneUpdated(ApiEvent):
+class APIZoneUpdated(APIEvent):
     domain: str
     zone_name: str
     changes: dict
@@ -174,7 +174,7 @@ class ApiZoneUpdated(ApiEvent):
 
 
 @dataclass
-class ApiZoneRemoved(ApiEvent):
+class APIZoneRemoved(APIEvent):
     domain: str
     zone_name: str
     client_ip: str

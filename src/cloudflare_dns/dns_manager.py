@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Awaitable, Iterable, Optional, Set
+from typing import TYPE_CHECKING, Awaitable, Dict, Iterable, List, Optional, Set
 
 from .client import CloudflareClient
 from ..telegram import DNSChange, DNSError
@@ -15,6 +15,19 @@ class DNSManager:
         self.client = client
         self.notifier = notifier
         self.logger = get_logger(__name__)
+        self._zone_ids: Dict[str, str] = {}
+
+    async def get_zone_id(self, domain: str) -> Optional[str]:
+        """Resolve the Cloudflare zone ID for `domain`, caching successful lookups."""
+        if domain not in self._zone_ids:
+            zone_id = await self.client.get_zone_id(domain)
+            if not zone_id:
+                return None
+            self._zone_ids[domain] = zone_id
+        return self._zone_ids[domain]
+
+    async def get_record_ips(self, zone_id: str, fqdn: str) -> List[str]:
+        return [r["content"] for r in await self.client.get_dns_records(zone_id, name=fqdn, record_type="A")]
 
     async def sync(
             self,
@@ -34,11 +47,11 @@ class DNSManager:
         to_remove = existing.keys() - (configured & healthy_ips)
 
         published = set(existing)
-        for ip in to_add:
+        for ip in sorted(to_add):
             if await self._apply(fqdn, ip, "add", self.client.create_dns_record(
                     zone_id=zone_id, name=fqdn, content=ip, record_type="A", ttl=ttl, proxied=proxied)):
                 published.add(ip)
-        for ip in to_remove:
+        for ip in sorted(to_remove):
             if await self._apply(fqdn, ip, "remove", self.client.delete_dns_record(zone_id, existing[ip]["id"])):
                 published.discard(ip)
 

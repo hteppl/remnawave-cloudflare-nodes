@@ -35,7 +35,7 @@ class HostManager:
         else:
             self.logger.info("Hosts config not configured, nothing to reload")
 
-    async def sync_host_states(self, active_fqdns: Set[str], managed_fqdns: Set[str]) -> None:
+    async def sync(self, active_fqdns: Set[str], managed_fqdns: Set[str]) -> None:
         if not self.enabled:
             return
 

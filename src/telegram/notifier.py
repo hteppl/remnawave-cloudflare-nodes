@@ -7,7 +7,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 
 from .events import Event, EventCategory
-from .formatter import MessageFormatter
+from .formatter import TelegramFormatter
 from ..utils.logger import get_logger
 from ..utils.retry import retry_async
 
@@ -38,12 +38,12 @@ class TelegramNotifier:
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
         self._worker_task: Optional[asyncio.Task] = None
         self._bot: Optional[Bot] = None
-        self._formatter: Optional[MessageFormatter] = None
+        self._formatter: Optional[TelegramFormatter] = None
 
         self.enabled = bool(enabled and bot_token and chat_id)
         if self.enabled:
             self._bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-            self._formatter = MessageFormatter()
+            self._formatter = TelegramFormatter()
             topic_info = f", topic_id={topic_id}" if topic_id else ""
             self.logger.info(f"TelegramNotifier initialized{topic_info}")
         else:

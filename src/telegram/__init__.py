@@ -14,19 +14,19 @@ from .events import (
     ServiceStopped,
     HostGroupChange,
     HostStateChange,
-    ApiConfigUpdated,
-    ApiDomainAdded,
-    ApiDomainRemoved,
-    ApiZoneAdded,
-    ApiZoneUpdated,
-    ApiZoneRemoved,
+    APIConfigUpdated,
+    APIDomainAdded,
+    APIDomainRemoved,
+    APIZoneAdded,
+    APIZoneUpdated,
+    APIZoneRemoved,
 )
-from .formatter import MessageFormatter
+from .formatter import TelegramFormatter
 from .notifier import TelegramNotifier
 
 __all__ = [
     "TelegramNotifier",
-    "MessageFormatter",
+    "TelegramFormatter",
     "Event",
     "EventCategory",
     "ZoneStats",
@@ -42,10 +42,10 @@ __all__ = [
     "ServiceStopped",
     "HostGroupChange",
     "HostStateChange",
-    "ApiConfigUpdated",
-    "ApiDomainAdded",
-    "ApiDomainRemoved",
-    "ApiZoneAdded",
-    "ApiZoneUpdated",
-    "ApiZoneRemoved",
+    "APIConfigUpdated",
+    "APIDomainAdded",
+    "APIDomainRemoved",
+    "APIZoneAdded",
+    "APIZoneUpdated",
+    "APIZoneRemoved",
 ]

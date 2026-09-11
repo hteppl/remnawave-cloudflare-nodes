@@ -1,7 +1,7 @@
 from .cloudflare_dns import CloudflareClient, DNSManager
 from .config import Config
 from .monitoring_service import MonitoringService
-from .panel import RemnawaveClient, NodeMonitor, NodeStatus
+from .remnawave_panel import RemnawaveClient, NodeMonitor, NodeStatus
 
 __all__ = [
     "Config",

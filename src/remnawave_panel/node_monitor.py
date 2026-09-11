@@ -37,7 +37,7 @@ class NodeMonitor:
         self.client = client
         self.logger = get_logger(__name__)
 
-    async def check_all_nodes(self) -> List[NodeStatus]:
+    async def check_nodes(self) -> List[NodeStatus]:
         statuses = [NodeStatus(node) for node in await self.client.get_nodes()]
         for status in statuses:
             self.logger.debug(repr(status))

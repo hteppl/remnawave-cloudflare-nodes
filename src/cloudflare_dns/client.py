@@ -95,7 +95,7 @@ class CloudflareClient:
         )
         self.logger.debug(f"Deleted DNS record: {record_id}")
 
-    async def get_zone_id_by_domain(self, domain: str) -> Optional[str]:
+    async def get_zone_id(self, domain: str) -> Optional[str]:
         async def fetch() -> Optional[str]:
             async for zone in self.cf.zones.list(name=domain):
                 return zone.id
